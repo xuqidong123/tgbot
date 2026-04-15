@@ -1,0 +1,1316 @@
+﻿config.py
+BOT_TOKEN = "在此填写你的 Telegram Bot Token"
+ADMIN_ID = 1234567890  # 在此填写你的 Telegram 管理员 ID
+GROUP_CHAT_IDS = []
+WEBHOOK_PORT = 5000
+WEBHOOK_SECRET = "在此填写你的 Webhook Secret"
+BINANCE_TESTNET = True
+
+database.py
+import sqlite3
+import os
+
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.db")
+
+def get_conn():
+    return sqlite3.connect(DB_PATH)
+
+def init_db():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        api_key TEXT,
+        api_secret TEXT,
+        leverage INTEGER DEFAULT 10,
+        amount REAL DEFAULT 100,
+        active INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        symbol TEXT,
+        action TEXT,
+        price REAL,
+        amount REAL,
+        leverage INTEGER,
+        status TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS signal_coins (
+        coin TEXT PRIMARY KEY,
+        last_signal TEXT,
+        last_time TEXT,
+        signal_count INTEGER DEFAULT 0
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_coins (
+        user_id INTEGER,
+        coin TEXT,
+        enabled INTEGER DEFAULT 1,
+        amount REAL DEFAULT 0,
+        PRIMARY KEY(user_id, coin)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS coin_intervals (
+        coin TEXT,
+        interval TEXT,
+        first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(coin, interval)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS alert_groups (
+        group_id TEXT PRIMARY KEY,
+        group_name TEXT DEFAULT '',
+        alert_open INTEGER DEFAULT 1,
+        alert_fail INTEGER DEFAULT 1,
+        alert_error INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+
+    for stmt in [
+        "ALTER TABLE users ADD COLUMN mode TEXT DEFAULT 'both'",
+        "ALTER TABLE users ADD COLUMN tp_type TEXT DEFAULT 'none'",
+        "ALTER TABLE users ADD COLUMN tp_value REAL DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN sl_type TEXT DEFAULT 'none'",
+        "ALTER TABLE users ADD COLUMN sl_value REAL DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN exchange TEXT DEFAULT 'binance'",
+        "ALTER TABLE users ADD COLUMN lighter_private_key TEXT",
+        "ALTER TABLE users ADD COLUMN lighter_account_index INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN lighter_api_key_index INTEGER DEFAULT 0",
+        "ALTER TABLE user_coins ADD COLUMN interval TEXT DEFAULT ''",
+    ]:
+        try:
+            c.execute(stmt)
+        except:
+            pass
+
+    conn.commit()
+    conn.close()
+
+def _row_to_user(row):
+    if not row:
+        return None
+    user = {
+        "user_id": row[0], "username": row[1],
+        "api_key": row[2], "api_secret": row[3],
+        "leverage": row[4], "amount": row[5], "active": row[6],
+    }
+    user["mode"] = row[8] if len(row) > 8 else "both"
+    user["tp_type"] = row[9] if len(row) > 9 else "none"
+    user["tp_value"] = row[10] if len(row) > 10 else 0
+    user["sl_type"] = row[11] if len(row) > 11 else "none"
+    user["sl_value"] = row[12] if len(row) > 12 else 0
+    user["exchange"] = row[13] if len(row) > 13 else "binance"
+    user["lighter_private_key"] = row[14] if len(row) > 14 else None
+    user["lighter_account_index"] = row[15] if len(row) > 15 else 0
+    user["lighter_api_key_index"] = row[16] if len(row) > 16 else 0
+    return user
+
+def add_user(user_id, username, api_key, api_secret, exchange="binance", lighter_private_key=None, lighter_account_index=0, lighter_api_key_index=0):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""REPLACE INTO users
+    (user_id, username, api_key, api_secret, exchange, lighter_private_key, lighter_account_index, lighter_api_key_index)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+    (user_id, username, api_key, api_secret, exchange, lighter_private_key, lighter_account_index, lighter_api_key_index))
+    conn.commit()
+    conn.close()
+
+def get_user(user_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return _row_to_user(row)
+
+def get_all_active_users():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE active = 1 AND (api_key IS NOT NULL OR lighter_private_key IS NOT NULL)")
+    rows = c.fetchall()
+    conn.close()
+    return [_row_to_user(r) for r in rows]
+
+def set_user_amount(user_id, amount):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("UPDATE users SET amount = ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+    conn.close()
+
+def set_user_leverage(user_id, leverage):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("UPDATE users SET leverage = ? WHERE user_id = ?", (leverage, user_id))
+    conn.commit()
+    conn.close()
+
+def set_user_active(user_id, active):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("UPDATE users SET active = ? WHERE user_id = ?", (active, user_id))
+    conn.commit()
+    conn.close()
+
+def set_user_mode(user_id, mode):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("UPDATE users SET mode = ? WHERE user_id = ?", (mode, user_id))
+    conn.commit()
+    conn.close()
+
+def set_user_tp(user_id, tp_type, tp_value):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("UPDATE users SET tp_type = ?, tp_value = ? WHERE user_id = ?", (tp_type, tp_value, user_id))
+    conn.commit()
+    conn.close()
+
+def set_user_sl(user_id, sl_type, sl_value):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("UPDATE users SET sl_type = ?, sl_value = ? WHERE user_id = ?", (sl_type, sl_value, user_id))
+    conn.commit()
+    conn.close()
+
+def delete_user(user_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+    c.execute("DELETE FROM user_coins WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def add_trade(user_id, symbol, action, price, amount, leverage, status):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT INTO trades (user_id, symbol, action, price, amount, leverage, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              (user_id, symbol, action, price, amount, leverage, status))
+    conn.commit()
+    conn.close()
+
+def get_user_trades(user_id, limit=10):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM trades WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def record_signal_coin(coin, action, time_str):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT INTO signal_coins (coin, last_signal, last_time, signal_count) VALUES (?, ?, ?, 1) ON CONFLICT(coin) DO UPDATE SET last_signal=?, last_time=?, signal_count=signal_count+1",
+              (coin, action, time_str, action, time_str))
+    conn.commit()
+    conn.close()
+
+def record_coin_interval(coin, interval):
+    if not interval:
+        return
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO coin_intervals (coin, interval) VALUES (?, ?)", (coin, interval))
+    conn.commit()
+    conn.close()
+
+def get_coin_intervals(coin):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT interval FROM coin_intervals WHERE coin = ? ORDER BY interval", (coin,))
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+def get_all_coin_intervals():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT coin, interval FROM coin_intervals ORDER BY coin, interval")
+    rows = c.fetchall()
+    conn.close()
+    result = {}
+    for r in rows:
+        result.setdefault(r[0], []).append(r[1])
+    return result
+
+def get_all_signal_coins():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM signal_coins ORDER BY coin")
+    rows = c.fetchall()
+    conn.close()
+    return [{"coin": r[0], "last_signal": r[1], "last_time": r[2], "signal_count": r[3]} for r in rows]
+
+def get_user_coin(user_id, coin):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM user_coins WHERE user_id = ? AND coin = ?", (user_id, coin))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {"user_id": row[0], "coin": row[1], "enabled": row[2], "amount": row[3], "interval": row[4] if len(row) > 4 else ""}
+    return None
+
+def get_user_coins(user_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM user_coins WHERE user_id = ?", (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [{"user_id": r[0], "coin": r[1], "enabled": r[2], "amount": r[3], "interval": r[4] if len(r) > 4 else ""} for r in rows]
+
+def set_user_coin(user_id, coin, enabled, amount):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT INTO user_coins (user_id, coin, enabled, amount) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, coin) DO UPDATE SET enabled=?, amount=?",
+              (user_id, coin, enabled, amount, enabled, amount))
+    conn.commit()
+    conn.close()
+
+def set_user_coin_enabled(user_id, coin, enabled):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT INTO user_coins (user_id, coin, enabled) VALUES (?, ?, ?) ON CONFLICT(user_id, coin) DO UPDATE SET enabled=?",
+              (user_id, coin, enabled, enabled))
+    conn.commit()
+    conn.close()
+
+def set_user_coin_amount(user_id, coin, amount):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT INTO user_coins (user_id, coin, amount) VALUES (?, ?, ?) ON CONFLICT(user_id, coin) DO UPDATE SET amount=?",
+              (user_id, coin, amount, amount))
+    conn.commit()
+    conn.close()
+
+def set_user_coin_interval(user_id, coin, interval):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT INTO user_coins (user_id, coin, interval) VALUES (?, ?, ?) ON CONFLICT(user_id, coin) DO UPDATE SET interval=?",
+              (user_id, coin, interval, interval))
+    conn.commit()
+    conn.close()
+
+def get_user_coin_interval(user_id, coin):
+    uc = get_user_coin(user_id, coin)
+    if uc is None:
+        return ""
+    return uc.get("interval", "")
+
+def is_user_coin_enabled(user_id, coin):
+    uc = get_user_coin(user_id, coin)
+    if uc is None:
+        return True
+    return uc["enabled"] == 1
+
+def get_user_coin_amount(user_id, coin, default_amount):
+    uc = get_user_coin(user_id, coin)
+    if uc is None or uc["amount"] <= 0:
+        return default_amount
+    return uc["amount"]
+
+def add_alert_group(group_id, group_name=""):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO alert_groups (group_id, group_name) VALUES (?, ?)", (str(group_id), group_name))
+    conn.commit()
+    conn.close()
+
+def remove_alert_group(group_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM alert_groups WHERE group_id = ?", (str(group_id),))
+    conn.commit()
+    conn.close()
+
+def get_alert_groups():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM alert_groups ORDER BY created_at")
+    rows = c.fetchall()
+    conn.close()
+    return [{"group_id": r[0], "group_name": r[1], "alert_open": r[2], "alert_fail": r[3], "alert_error": r[4]} for r in rows]
+
+def get_alert_group(group_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM alert_groups WHERE group_id = ?", (str(group_id),))
+    r = c.fetchone()
+    conn.close()
+    if not r:
+        return None
+    return {"group_id": r[0], "group_name": r[1], "alert_open": r[2], "alert_fail": r[3], "alert_error": r[4]}
+
+def set_alert_group_setting(group_id, field, value):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(f"UPDATE alert_groups SET {field} = ? WHERE group_id = ?", (value, str(group_id)))
+    conn.commit()
+    conn.close()
+
+init_db()
+
+exchange.py
+import ccxt
+from config import BINANCE_TESTNET
+
+PROXY = "在此填写你的代理地址，例如 socks5://用户名:密码@主机:端口"
+
+def get_exchange(api_key, api_secret):
+    exchange = ccxt.binanceusdm({
+        "apiKey": api_key,
+        "secret": api_secret,
+        "enableRateLimit": True,
+        "proxies": {
+            "http": PROXY,
+            "https": PROXY,
+        },
+        "aiohttp_proxy": PROXY,
+    })
+    if BINANCE_TESTNET:
+        exchange.enable_demo_trading(True)
+    return exchange
+
+def get_balance(api_key, api_secret):
+    try:
+        exchange = get_exchange(api_key, api_secret)
+        balance = exchange.fetch_balance()
+        usdt = balance.get("USDT", {})
+        return {
+            "total": usdt.get("total", 0),
+            "free": usdt.get("free", 0),
+            "used": usdt.get("used", 0),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+def get_account_info(exchange):
+    try:
+        balance = exchange.fetch_balance()
+        usdt = balance.get("USDT", {})
+        total = float(usdt.get("total", 0))
+        free = float(usdt.get("free", 0))
+        used = float(usdt.get("used", 0))
+        return {"total": round(total, 2), "free": round(free, 2), "used": round(used, 2)}
+    except:
+        return {"total": 0, "free": 0, "used": 0}
+
+def get_current_position(exchange, symbol):
+    try:
+        positions = exchange.fetch_positions([symbol])
+        for pos in positions:
+            amt = float(pos["contracts"])
+            if amt > 0:
+                return {
+                    "side": pos["side"],
+                    "amount": amt,
+                    "entry_price": pos["entryPrice"],
+                    "pnl": float(pos["unrealizedPnl"] or 0),
+                    "notional": float(pos.get("notional") or 0),
+                    "margin": float(pos.get("initialMargin") or 0),
+                }
+        return None
+    except:
+        return None
+
+def get_trade_fees(exchange, symbol, limit=5):
+    try:
+        trades = exchange.fetch_my_trades(symbol, limit=limit)
+        total_fee = 0
+        for t in trades:
+            fee = t.get("fee", {})
+            total_fee += float(fee.get("cost", 0))
+        return round(total_fee, 6)
+    except:
+        return 0
+
+def calc_tp_sl_price(action, entry_price, tp_type, tp_value, sl_type, sl_value):
+    tp_price = None
+    sl_price = None
+    if tp_type == "percent" and tp_value > 0:
+        if action == "buy":
+            tp_price = entry_price * (1 + tp_value / 100)
+        else:
+            tp_price = entry_price * (1 - tp_value / 100)
+    elif tp_type == "amount" and tp_value > 0:
+        if action == "buy":
+            tp_price = entry_price + tp_value
+        else:
+            tp_price = entry_price - tp_value
+
+    if sl_type == "percent" and sl_value > 0:
+        if action == "buy":
+            sl_price = entry_price * (1 - sl_value / 100)
+        else:
+            sl_price = entry_price * (1 + sl_value / 100)
+    elif sl_type == "amount" and sl_value > 0:
+        if action == "buy":
+            sl_price = entry_price - sl_value
+        else:
+            sl_price = entry_price + sl_value
+
+    return tp_price, sl_price
+
+def place_tp_sl_orders(exchange, symbol, action, amount, tp_price, sl_price):
+    tp_sl_info = []
+    try:
+        if tp_price:
+            tp_price = float(exchange.price_to_precision(symbol, tp_price))
+            close_side = "sell" if action == "buy" else "buy"
+            exchange.create_order(symbol, "TAKE_PROFIT_MARKET", close_side, amount, None, {
+                "stopPrice": tp_price,
+                "closePosition": False,
+                "reduceOnly": True,
+            })
+            tp_sl_info.append(f"止盈价: {tp_price}")
+    except Exception as e:
+        tp_sl_info.append(f"止盈设置失败: {e}")
+
+    try:
+        if sl_price:
+            sl_price = float(exchange.price_to_precision(symbol, sl_price))
+            close_side = "sell" if action == "buy" else "buy"
+            exchange.create_order(symbol, "STOP_MARKET", close_side, amount, None, {
+                "stopPrice": sl_price,
+                "closePosition": False,
+                "reduceOnly": True,
+            })
+            tp_sl_info.append(f"止损价: {sl_price}")
+    except Exception as e:
+        tp_sl_info.append(f"止损设置失败: {e}")
+
+    return tp_sl_info
+
+def open_order(api_key, api_secret, symbol, action, usdt_amount, leverage, tp_type="none", tp_value=0, sl_type="none", sl_value=0):
+    try:
+        exchange = get_exchange(api_key, api_secret)
+        exchange.set_leverage(leverage, symbol)
+        account = get_account_info(exchange)
+        current_pos = get_current_position(exchange, symbol)
+        msgs = []
+
+        pre_info = (
+            f"\n--- 开单前状态 ---\n"
+            f"总余额: {account['total']} USDT\n"
+            f"可用余额: {account['free']} USDT\n"
+            f"已占用: {account['used']} USDT"
+        )
+
+        if current_pos:
+            current_side = current_pos["side"]
+            current_amount = current_pos["amount"]
+            pre_info += (
+                f"\n当前持仓: {current_side} {current_amount}\n"
+                f"开仓价: {current_pos['entry_price']}\n"
+                f"未实现盈亏: {round(current_pos['pnl'], 4)} USDT"
+            )
+            if action == "buy" and current_side == "long":
+                return {"error": "已有多单，跳过"}
+            if action == "sell" and current_side == "short":
+                return {"error": "已有空单，跳过"}
+            if action == "buy" and current_side == "short":
+                exchange.create_market_buy_order(symbol, current_amount)
+                msgs.append(f"已平空单 {current_amount}")
+            if action == "sell" and current_side == "long":
+                exchange.create_market_sell_order(symbol, current_amount)
+                msgs.append(f"已平多单 {current_amount}")
+        else:
+            pre_info += "\n当前持仓: 无"
+
+        ticker = exchange.fetch_ticker(symbol)
+        price = ticker["last"]
+        amount = (usdt_amount * leverage) / price
+        amount = exchange.amount_to_precision(symbol, amount)
+        amount = float(amount)
+
+        if amount <= 0:
+            return {"error": "数量为0，金额太小"}
+
+        if action == "buy":
+            order = exchange.create_market_buy_order(symbol, amount)
+        elif action == "sell":
+            order = exchange.create_market_sell_order(symbol, amount)
+        else:
+            return {"error": f"未知操作: {action}"}
+
+        tp_price, sl_price = calc_tp_sl_price(action, price, tp_type, tp_value, sl_type, sl_value)
+        tp_sl_info = place_tp_sl_orders(exchange, symbol, action, amount, tp_price, sl_price)
+        account_after = get_account_info(exchange)
+        fee = get_trade_fees(exchange, symbol, limit=3)
+
+        result = {
+            "success": True,
+            "order_id": order["id"],
+            "symbol": symbol,
+            "action": action,
+            "amount": amount,
+            "price": price,
+            "fee": fee,
+            "pre_info": pre_info,
+            "post_total": account_after["total"],
+            "post_free": account_after["free"],
+            "post_used": account_after["used"],
+            "tp_sl_info": tp_sl_info,
+        }
+
+        if msgs:
+            result["extra"] = " | ".join(msgs)
+        return result
+
+    except Exception as e:
+        return {"error": str(e)}
+
+def close_position(api_key, api_secret, symbol):
+    try:
+        exchange = get_exchange(api_key, api_secret)
+        current_pos = get_current_position(exchange, symbol)
+        if not current_pos:
+            return {"error": "没有持仓"}
+
+        account_before = get_account_info(exchange)
+        pnl_before = current_pos["pnl"]
+        entry_price = current_pos["entry_price"]
+        side = current_pos["side"]
+        amt = current_pos["amount"]
+
+        if side == "long":
+            order = exchange.create_market_sell_order(symbol, amt)
+        else:
+            order = exchange.create_market_buy_order(symbol, amt)
+
+        try:
+            exchange.cancel_all_orders(symbol)
+        except:
+            pass
+
+        account_after = get_account_info(exchange)
+        fee = get_trade_fees(exchange, symbol, limit=3)
+        realized_pnl = round(account_after["total"] - account_before["total"], 4)
+
+        return {
+            "success": True,
+            "closed": side,
+            "amount": amt,
+            "entry_price": entry_price,
+            "pnl": round(pnl_before, 4),
+            "realized_pnl": realized_pnl,
+            "fee": fee,
+            "total_after": account_after["total"],
+            "free_after": account_after["free"],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+def get_positions(api_key, api_secret):
+    try:
+        exchange = get_exchange(api_key, api_secret)
+        positions = exchange.fetch_positions()
+        active = []
+        for pos in positions:
+            if float(pos["contracts"]) > 0:
+                active.append({
+                    "symbol": pos["symbol"],
+                    "side": pos["side"],
+                    "amount": pos["contracts"],
+                    "entry_price": pos["entryPrice"],
+                    "pnl": pos["unrealizedPnl"],
+                    "notional": pos.get("notional"),
+                    "margin": pos.get("initialMargin"),
+                })
+        return active
+    except Exception as e:
+        return {"error": str(e)}
+
+def cancel_all_orders_for_user(api_key, api_secret):
+    try:
+        exchange = get_exchange(api_key, api_secret)
+        exchange.options['warnOnFetchOpenOrdersWithoutSymbol'] = False
+        orders = exchange.fetch_open_orders()
+        count = 0
+        for order in orders:
+            try:
+                exchange.cancel_order(order["id"], order["symbol"])
+                count += 1
+            except:
+                pass
+        return {"count": count}
+    except Exception as e:
+        return {"error": str(e)}
+
+exchange_lighter.py
+import os
+
+os.environ['HTTPS_PROXY'] = '在此填写你的 HTTPS 代理，例如 socks5://用户名:密码@主机:端口'
+os.environ['HTTP_PROXY'] = '在此填写你的 HTTP 代理，例如 socks5://用户名:密码@主机:端口'
+
+import logging
+import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor
+import lighter
+
+logger = logging.getLogger(__name__)
+
+# ---------- 配置 ----------
+LIGHTER_MAINNET = "https://mainnet.zklighter.elliot.ai"
+LIGHTER_TESTNET = "https://testnet.zklighter.elliot.ai"
+LIGHTER_USE_TESTNET = False  # False=主网真实交易
+
+def _get_url():
+    return LIGHTER_TESTNET if LIGHTER_USE_TESTNET else LIGHTER_MAINNET
+
+# ---------- 异步转同步 ----------
+_executor = ThreadPoolExecutor(max_workers=4)
+
+def _run_async(coro):
+    def _run():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+    future = _executor.submit(_run)
+    return future.result(timeout=30)
+
+# ---------- 市场映射 ----------
+_market_cache = {}
+
+async def _load_markets_async():
+    global _market_cache
+    try:
+        api_client = lighter.ApiClient(configuration=lighter.Configuration(host=_get_url()))
+        order_api = lighter.OrderApi(api_client)
+        result = await order_api.order_books()
+        logger.info("order_books type: %s", type(result))
+
+        books = None
+        if hasattr(result, 'order_books'):
+            books = result.order_books
+        elif hasattr(result, 'data'):
+            books = result.data
+        elif isinstance(result, list):
+            books = result
+
+        if books:
+            for ob in books:
+                idx = None
+                sym = None
+                if hasattr(ob, 'market_index'):
+                    idx = int(ob.market_index)
+                elif hasattr(ob, 'index'):
+                    idx = int(ob.index)
+                elif isinstance(ob, dict):
+                    idx = int(ob.get('market_index', ob.get('index', -1)))
+
+                if hasattr(ob, 'symbol'):
+                    sym = str(ob.symbol)
+                elif hasattr(ob, 'ticker'):
+                    sym = str(ob.ticker)
+                elif isinstance(ob, dict):
+                    sym = ob.get('symbol', ob.get('ticker', ''))
+
+                if idx is not None and sym:
+                    base = sym.upper().replace("/", "").replace("-", "").replace("_", "")
+                    base = base.replace("PERP", "").replace("USD", "").replace("USDT", "").replace("USDC", "")
+                    _market_cache[base] = idx
+                    logger.info("Market: %s -> %d", base, idx)
+
+        await api_client.close()
+    except Exception as e:
+        logger.warning("Load markets failed: %s", e)
+        defaults = {"ETH": 0, "BTC": 1, "SOL": 2, "ARB": 3, "OP": 4, "AVAX": 5, "DOGE": 6}
+        for k, v in defaults.items():
+            if k not in _market_cache:
+                _market_cache[k] = v
+
+def _ensure_markets():
+    if not _market_cache:
+        try:
+            _run_async(_load_markets_async())
+        except Exception as e:
+            logger.warning("Market load timeout: %s", e)
+            defaults = {"ETH": 0, "BTC": 1, "SOL": 2, "ARB": 3, "OP": 4, "AVAX": 5, "DOGE": 6}
+            _market_cache.update(defaults)
+
+def _symbol_to_base(symbol):
+    s = symbol.upper().replace("/", "").replace(":USDT", "").replace("-", "")
+    s = s.replace(".P", "").replace("PERP", "")
+    if s.endswith("USDT"):
+        s = s[:-4]
+    elif s.endswith("USDC"):
+        s = s[:-4]
+    elif s.endswith("USD"):
+        s = s[:-3]
+    return s
+
+def _symbol_to_market_index(symbol):
+    _ensure_markets()
+    base = _symbol_to_base(symbol)
+    idx = _market_cache.get(base)
+    if idx is None:
+        logger.error("Unknown symbol: %s, cache: %s", base, _market_cache)
+    return idx
+
+# ---------- 创建客户端 ----------
+def _create_signer(private_key, account_index, api_key_index):
+    client = lighter.SignerClient(
+        url=_get_url(),
+        account_index=int(account_index),
+        api_private_keys={int(api_key_index): private_key},
+    )
+    err = client.check_client()
+    if err:
+        raise Exception("Lighter连接失败: " + str(err))
+    return client
+
+# ---------- 查余额 ----------
+async def _get_balance_async(account_index):
+    api_client = lighter.ApiClient(configuration=lighter.Configuration(host=_get_url()))
+    account_api = lighter.AccountApi(api_client)
+    try:
+        resp = await account_api.account(by="index", value=str(int(account_index)))
+        if not resp.accounts or len(resp.accounts) == 0:
+            return {"error": "账户不存在"}
+        acc = resp.accounts[0]
+        total = float(acc.collateral or 0)
+        free = float(acc.available_balance or 0)
+        used = total - free
+        logger.info("Lighter余额: total=%s free=%s", total, free)
+        return {"total": round(total, 2), "free": round(free, 2), "used": round(abs(used), 2)}
+    except Exception as e:
+        logger.error("查询余额失败: %s", e)
+        return {"error": str(e)}
+    finally:
+        await api_client.close()
+
+def get_lighter_balance(private_key, account_index, api_key_index):
+    try:
+        return _run_async(_get_balance_async(account_index))
+    except Exception as e:
+        return {"error": str(e)}
+
+# ---------- 查持仓 ----------
+async def _get_positions_async(account_index):
+    api_client = lighter.ApiClient(configuration=lighter.Configuration(host=_get_url()))
+    account_api = lighter.AccountApi(api_client)
+    try:
+        resp = await account_api.account(by="index", value=str(int(account_index)))
+        if not resp.accounts or len(resp.accounts) == 0:
+            return []
+        acc = resp.accounts[0]
+        positions = []
+        if not acc.positions:
+            return positions
+
+        for p in acc.positions:
+            pos_size = float(p.position or 0)
+            if pos_size == 0:
+                continue
+            market_idx = int(p.market_id)
+            entry_price = float(p.avg_entry_price or 0)
+            pnl = float(p.unrealized_pnl or 0)
+            margin = float(p.allocated_margin or 0)
+            sym_name = (p.symbol + "/USDT:USDT") if p.symbol else "UNKNOWN"
+            side = "long" if pos_size > 0 else "short"
+            notional = abs(pos_size) * entry_price
+            positions.append({
+                "symbol": sym_name,
+                "side": side,
+                "amount": abs(pos_size),
+                "entry_price": round(entry_price, 4),
+                "pnl": round(pnl, 4),
+                "notional": round(notional, 2),
+                "margin": round(margin, 2),
+                "market_index": market_idx,
+            })
+        return positions
+    except Exception as e:
+        logger.error("查询持仓失败: %s", e)
+        return {"error": str(e)}
+    finally:
+        await api_client.close()
+
+def get_lighter_positions(private_key, account_index, api_key_index):
+    try:
+        return _run_async(_get_positions_async(account_index))
+    except Exception as e:
+        return {"error": str(e)}
+
+# ---------- 开单 ----------
+async def _open_order_async(private_key, account_index, api_key_index, symbol, action, usdt_amount, leverage, tp_type, tp_value, sl_type, sl_value):
+    market_index = _symbol_to_market_index(symbol)
+    if market_index is None:
+        return {"error": "不支持的币种: " + symbol}
+
+    client = _create_signer(private_key, account_index, api_key_index)
+
+    try:
+        tx, tx_hash, err = await client.update_leverage(
+            market_index=market_index,
+            leverage=int(leverage),
+            margin_mode=client.CROSS_MARGIN_MODE,
+        )
+        if err:
+            logger.warning("Set leverage warning: %s", err)
+
+        positions = _run_async(_get_positions_async(account_index))
+        if not isinstance(positions, list):
+            positions = []
+
+        current_pos = None
+        for p in positions:
+            if p.get("market_index") == market_index:
+                current_pos = p
+                break
+
+        msgs = []
+        if current_pos:
+            current_side = current_pos["side"]
+            current_amount = current_pos["amount"]
+
+            if action == "buy" and current_side == "long":
+                return {"error": "已有多单，跳过"}
+            if action == "sell" and current_side == "short":
+                return {"error": "已有空单，跳过"}
+
+            is_ask = True if current_side == "long" else False
+            close_quote = current_amount * current_pos["entry_price"]
+            tx, tx_hash, err = await client.create_market_order_quote_amount(
+                market_index=market_index,
+                client_order_index=0,
+                quote_amount=close_quote,
+                max_slippage=0.005,
+                is_ask=is_ask,
+            )
+            if err:
+                logger.warning("Close existing position: %s", err)
+            else:
+                msgs.append("已平" + ("多" if current_side == "long" else "空") + "单")
+            await asyncio.sleep(1)
+
+        quote_amount = usdt_amount * leverage
+        is_ask = True if action == "sell" else False
+        tx, tx_hash, err = await client.create_market_order_quote_amount(
+            market_index=market_index,
+            client_order_index=0,
+            quote_amount=quote_amount,
+            max_slippage=0.005,
+            is_ask=is_ask,
+        )
+        if err:
+            return {"error": "下单失败: " + str(err)}
+
+        logger.info("Order tx_hash: %s", tx_hash)
+
+        await asyncio.sleep(2)
+        new_positions = _run_async(_get_positions_async(account_index))
+        filled_price = 0
+        filled_amount = 0
+        if isinstance(new_positions, list):
+            for p in new_positions:
+                if p.get("market_index") == market_index:
+                    filled_price = p["entry_price"]
+                    filled_amount = p["amount"]
+                    break
+
+        tp_sl_info = []
+        if filled_price > 0 and filled_amount > 0:
+            tp_sl_info = await _set_tp_sl(client, market_index, action, filled_price, tp_type, tp_value, sl_type, sl_value)
+
+        result = {
+            "success": True,
+            "order_id": str(tx_hash) if tx_hash else "unknown",
+            "symbol": symbol,
+            "action": action,
+            "amount": filled_amount,
+            "price": filled_price,
+            "fee": 0,
+            "tp_sl_info": tp_sl_info,
+        }
+        if msgs:
+            result["extra"] = " | ".join(msgs)
+        return result
+
+    except Exception as e:
+        logger.error("Open order error: %s", e)
+        return {"error": str(e)}
+
+async def _set_tp_sl(client, market_index, action, entry_price, tp_type, tp_value, sl_type, sl_value):
+    info = []
+    tp_price = None
+    sl_price = None
+
+    if tp_type == "percent" and tp_value > 0:
+        if action == "buy":
+            tp_price = entry_price * (1 + tp_value / 100)
+        else:
+            tp_price = entry_price * (1 - tp_value / 100)
+    elif tp_type == "amount" and tp_value > 0:
+        if action == "buy":
+            tp_price = entry_price + tp_value
+        else:
+            tp_price = entry_price - tp_value
+
+    if sl_type == "percent" and sl_value > 0:
+        if action == "buy":
+            sl_price = entry_price * (1 - sl_value / 100)
+        else:
+            sl_price = entry_price * (1 + sl_value / 100)
+    elif sl_type == "amount" and sl_value > 0:
+        if action == "buy":
+            sl_price = entry_price - sl_value
+        else:
+            sl_price = entry_price + sl_value
+
+    if not tp_price and not sl_price:
+        return info
+
+    try:
+        from lighter.signer_client import CreateOrderTxReq
+
+        is_close_ask = 1 if action == "buy" else 0
+        orders = []
+
+        if tp_price:
+            tp_price_scaled = int(tp_price * 100)
+            trigger_tp = tp_price_scaled
+            orders.append(CreateOrderTxReq(
+                MarketIndex=market_index,
+                ClientOrderIndex=0,
+                BaseAmount=0,
+                Price=tp_price_scaled,
+                IsAsk=is_close_ask,
+                Type=client.ORDER_TYPE_TAKE_PROFIT_LIMIT,
+                TimeInForce=client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+                ReduceOnly=1,
+                TriggerPrice=trigger_tp,
+                OrderExpiry=-1,
+            ))
+            info.append("止盈价: " + str(round(tp_price, 2)))
+
+        if sl_price:
+            sl_price_scaled = int(sl_price * 100)
+            trigger_sl = sl_price_scaled
+            orders.append(CreateOrderTxReq(
+                MarketIndex=market_index,
+                ClientOrderIndex=0,
+                BaseAmount=0,
+                Price=sl_price_scaled,
+                IsAsk=is_close_ask,
+                Type=client.ORDER_TYPE_STOP_LOSS_LIMIT,
+                TimeInForce=client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+                ReduceOnly=1,
+                TriggerPrice=trigger_sl,
+                OrderExpiry=-1,
+            ))
+            info.append("止损价: " + str(round(sl_price, 2)))
+
+        if len(orders) >= 2:
+            tx, tx_hash, err = await client.create_grouped_orders(
+                grouping_type=client.GROUPING_TYPE_ONE_CANCELS_THE_OTHER,
+                orders=orders,
+            )
+        elif len(orders) == 1:
+            tx, tx_hash, err = await client.create_grouped_orders(
+                grouping_type=client.GROUPING_TYPE_ONE_CANCELS_THE_OTHER,
+                orders=orders,
+            )
+
+        if err:
+            info.append("TP/SL设置警告: " + str(err))
+    except Exception as e:
+        info.append("TP/SL设置失败: " + str(e))
+        logger.error("TP/SL error: %s", e)
+
+    return info
+
+def lighter_open_order(private_key, account_index, api_key_index, symbol, action, usdt_amount, leverage, tp_type="none", tp_value=0, sl_type="none", sl_value=0):
+    try:
+        return _run_async(_open_order_async(private_key, account_index, api_key_index, symbol, action, usdt_amount, leverage, tp_type, tp_value, sl_type, sl_value))
+    except Exception as e:
+        return {"error": str(e)}
+
+# ---------- 平仓 ----------
+async def _close_position_async(private_key, account_index, api_key_index, symbol):
+    market_index = _symbol_to_market_index(symbol)
+    if market_index is None:
+        return {"error": "不支持的币种: " + symbol}
+
+    client = _create_signer(private_key, account_index, api_key_index)
+
+    try:
+        positions = _run_async(_get_positions_async(account_index))
+        if not isinstance(positions, list):
+            return {"error": "查询持仓失败"}
+
+        target = None
+        for p in positions:
+            if p.get("market_index") == market_index:
+                target = p
+                break
+
+        if not target:
+            return {"error": "没有持仓"}
+
+        side = target["side"]
+        amount = target["amount"]
+        entry_price = target["entry_price"]
+        pnl = target["pnl"]
+
+        is_ask = True if side == "long" else False
+        close_quote = amount * entry_price
+        tx, tx_hash, err = await client.create_market_order_quote_amount(
+            market_index=market_index,
+            client_order_index=0,
+            quote_amount=close_quote * 1.01,
+            max_slippage=0.01,
+            is_ask=is_ask,
+        )
+        if err:
+            return {"error": "平仓失败: " + str(err)}
+
+        try:
+            ts = int(time.time() * 1000)
+            await client.cancel_all_orders(
+                time_in_force=client.CANCEL_ALL_TIF_IMMEDIATE,
+                timestamp_ms=ts,
+            )
+        except Exception as e:
+            logger.warning("Cancel orders after close: %s", e)
+
+        return {
+            "success": True,
+            "closed": side,
+            "amount": amount,
+            "entry_price": entry_price,
+            "pnl": round(pnl, 4),
+            "price": entry_price,
+        }
+    except Exception as e:
+        logger.error("Close position error: %s", e)
+        return {"error": str(e)}
+
+def lighter_close_position(private_key, account_index, api_key_index, symbol):
+    try:
+        return _run_async(_close_position_async(private_key, account_index, api_key_index, symbol))
+    except Exception as e:
+        return {"error": str(e)}
+
+# ---------- 取消所有挂单 ----------
+async def _cancel_all_async(private_key, account_index, api_key_index):
+    client = _create_signer(private_key, account_index, api_key_index)
+    try:
+        ts = int(time.time() * 1000)
+        tx, tx_hash, err = await client.cancel_all_orders(
+            time_in_force=client.CANCEL_ALL_TIF_IMMEDIATE,
+            timestamp_ms=ts,
+        )
+        if err:
+            return {"error": "取消失败: " + str(err)}
+        return {"count": -1, "msg": "已发送取消全部订单"}
+    except Exception as e:
+        return {"error": str(e)}
+
+def lighter_cancel_all_orders(private_key, account_index, api_key_index):
+    try:
+        return _run_async(_cancel_all_async(private_key, account_index, api_key_index))
+    except Exception as e:
+        return {"error": str(e)}
+
+# ---------- 验证连接 ----------
+def verify_lighter_connection(private_key, account_index, api_key_index):
+    try:
+        _create_signer(private_key, account_index, api_key_index)
+        bal = get_lighter_balance(private_key, account_index, api_key_index)
+        return bal
+    except Exception as e:
+        return {"error": str(e)}
+
+bot.py
+import logging
+import requests
+from threading import Thread
+from flask import Flask, request as flask_request
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+
+from config import BOT_TOKEN, ADMIN_ID, GROUP_CHAT_IDS, WEBHOOK_PORT, WEBHOOK_SECRET, BINANCE_TESTNET
+from database import (
+    add_user, get_user, get_all_active_users, set_user_amount,
+    set_user_leverage, set_user_active, set_user_mode, set_user_tp, set_user_sl,
+    delete_user, add_trade, get_user_trades,
+    record_signal_coin, get_all_signal_coins,
+    get_user_coin, get_user_coins, set_user_coin_enabled, set_user_coin_amount,
+    is_user_coin_enabled, get_user_coin_amount,
+    record_coin_interval, get_coin_intervals, get_all_coin_intervals,
+    get_user_coin_interval, set_user_coin_interval,
+    add_alert_group, remove_alert_group, get_alert_groups, get_alert_group, set_alert_group_setting
+)
+from exchange import get_balance, open_order, close_position, get_positions, cancel_all_orders_for_user
+from exchange_lighter import (
+    get_lighter_balance, lighter_open_order, lighter_close_position,
+    get_lighter_positions, lighter_cancel_all_orders, verify_lighter_connection
+)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+tg_app = None
+
+MODE_NAMES = {"both": "双向模式", "long_only": "只做多", "short_only": "只做空"}
+INTERVAL_NAMES = {
+    "1": "1分钟", "3": "3分钟", "5": "5分钟", "15": "15分钟",
+    "30": "30分钟", "45": "45分钟", "60": "1小时", "120": "2小时",
+    "180": "3小时", "240": "4小时", "D": "日线", "W": "周线", "M": "月线",
+}
+
+def interval_display(val):
+    if not val:
+        return "全部周期"
+    return INTERVAL_NAMES.get(str(val), str(val) + "分钟")
+
+def send_tg_message(chat_id, text):
+    url = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage"
+    requests.post(url, json={"chat_id": chat_id, "text": text})
+
+def send_group_alert(alert_type, text):
+    groups = get_alert_groups()
+    for g in groups:
+        if g.get("alert_" + alert_type, 0) == 1:
+            send_tg_message(g["group_id"], text)
+
+def is_admin(update):
+    return update.effective_user and update.effective_user.id == ADMIN_ID
+
+def format_tp_sl(user):
+    tp = "未设置"
+    sl = "未设置"
+    if user.get("tp_type") == "percent" and user.get("tp_value", 0) > 0:
+        tp = str(user["tp_value"]) + "%"
+    elif user.get("tp_type") == "amount" and user.get("tp_value", 0) > 0:
+        tp = str(user["tp_value"]) + " USDT"
+
+    if user.get("sl_type") == "percent" and user.get("sl_value", 0) > 0:
+        sl = str(user["sl_value"]) + "%"
+    elif user.get("sl_type") == "amount" and user.get("sl_value", 0) > 0:
+        sl = str(user["sl_value"]) + " USDT"
+    return tp, sl
+
+def is_lighter(user):
+    return user.get("exchange") == "lighter"
+
+def is_bound(user):
+    if is_lighter(user):
+        return bool(user.get("lighter_private_key"))
+    else:
+        return bool(user.get("api_key"))
+
+def route_get_balance(user):
+    if is_lighter(user):
+        return get_lighter_balance(user["lighter_private_key"], user["lighter_account_index"], user["lighter_api_key_index"])
+    return get_balance(user["api_key"], user["api_secret"])
+
+def route_get_positions(user):
+    if is_lighter(user):
+        return get_lighter_positions(user["lighter_private_key"], user["lighter_account_index"], user["lighter_api_key_index"])
+    return get_positions(user["api_key"], user["api_secret"])
+
+def route_close_position(user, symbol):
+    if is_lighter(user):
+        return lighter_close_position(user["lighter_private_key"], user["lighter_account_index"], user["lighter_api_key_index"], symbol)
+    return close_position(user["api_key"], user["api_secret"], symbol)
+
+def route_open_order(user, symbol, action, amount, leverage, tp_type, tp_value, sl_type, sl_value):
+    if is_lighter(user):
+        return lighter_open_order(
+            user["lighter_private_key"], user["lighter_account_index"], user["lighter_api_key_index"],
+            symbol, action, amount, leverage, tp_type, tp_value, sl_type, sl_value
+        )
+    return open_order(user["api_key"], user["api_secret"], symbol, action, amount, leverage, tp_type, tp_value, sl_type, sl_value)
+
+def route_cancel_all(user):
+    if is_lighter(user):
+        return lighter_cancel_all_orders(user["lighter_private_key"], user["lighter_account_index"], user["lighter_api_key_index"])
+    return cancel_all_orders_for_user(user["api_key"], user["api_secret"])
+
+def exchange_name(user):
+    return "Lighter(主网)" if is_lighter(user) else ("币安(模拟)" if BINANCE_TESTNET else "币安(实盘)")
+
+# ... 其余业务逻辑保持不变 ...
+
+# 下面这些位置属于“会接收用户密钥/私钥”的逻辑，但这里没有写死真实密钥，因此无需替换：
+# 1. /bind 绑定 Binance API Key / Secret
+# 2. /bind 绑定 Lighter Private Key
+# 3. verify_lighter_connection(...)
+# 4. add_user(... api_key, api_secret, lighter_private_key ...)
+
+# webhook 仍然通过 config.py 里的 WEBHOOK_SECRET 做鉴权
+app = Flask(__name__)
+
+@app.route("/trade-webhook", methods=["POST"])
+def webhook():
+    try:
+        data = flask_request.get_json(force=True)
+        if data.get("secret") != WEBHOOK_SECRET:
+            return "Forbidden", 403
+        logger.info("Webhook received: " + str(data))
+        t = Thread(target=process_signal, args=(data,))
+        t.start()
+        return "OK", 200
+    except Exception as e:
+        logger.error("Webhook error: " + str(e))
+        return "Error", 500
+
+def run_flask():
+    app.run(host="0.0.0.0", port=WEBHOOK_PORT, debug=False)
+
+def main():
+    global tg_app
+    tg_app = Application.builder().token(BOT_TOKEN).build()
+
+    tg_app.add_handler(CommandHandler("start", cmd_start))
+    tg_app.add_handler(CommandHandler("bind", cmd_bind))
+    tg_app.add_handler(CommandHandler("unbind", cmd_unbind))
+    tg_app.add_handler(CommandHandler("setamount", cmd_setamount))
+    tg_app.add_handler(CommandHandler("setleverage", cmd_setleverage))
+    tg_app.add_handler(CommandHandler("mode", cmd_mode))
+    tg_app.add_handler(CommandHandler("tp", cmd_tp))
+    tg_app.add_handler(CommandHandler("sl", cmd_sl))
+    tg_app.add_handler(CommandHandler("tpsl", cmd_tpsl))
+    tg_app.add_handler(CommandHandler("cleartpsl", cmd_cleartpsl))
+    tg_app.add_handler(CommandHandler("coins", cmd_coins))
+    tg_app.add_handler(CommandHandler("mycoins", cmd_mycoins))
+    tg_app.add_handler(CommandHandler("setcoin", cmd_setcoin))
+    tg_app.add_handler(CommandHandler("settf", cmd_settf))
+    tg_app.add_handler(CommandHandler("balance", cmd_balance))
+    tg_app.add_handler(CommandHandler("position", cmd_position))
+    tg_app.add_handler(CommandHandler("close", cmd_close))
+    tg_app.add_handler(CommandHandler("trades", cmd_trades))
+    tg_app.add_handler(CommandHandler("status", cmd_status))
+    tg_app.add_handler(CommandHandler("on", cmd_on))
+    tg_app.add_handler(CommandHandler("off", cmd_off))
+
+    tg_app.add_handler(CallbackQueryHandler(bind_exchange_callback, pattern="^bind_"))
+    tg_app.add_handler(CallbackQueryHandler(mode_callback, pattern="^mode_"))
+    tg_app.add_handler(CallbackQueryHandler(tpsl_callback, pattern="^(tp_|sl_)"))
+    tg_app.add_handler(CallbackQueryHandler(close_callback, pattern="^close_"))
+    tg_app.add_handler(CallbackQueryHandler(coin_callback, pattern="^coin_"))
+    tg_app.add_handler(CallbackQueryHandler(settf_callback, pattern="^tf_"))
+
+    tg_app.add_handler(CommandHandler("alertadd", cmd_alertadd))
+    tg_app.add_handler(CommandHandler("alertdel", cmd_alertdel))
+    tg_app.add_handler(CommandHandler("alertset", cmd_alertset))
+    tg_app.add_handler(CommandHandler("alertlist", cmd_alertlist))
+    tg_app.add_handler(CallbackQueryHandler(alert_callback, pattern="^alert"))
+
+    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    logger.info("Bot started!")
+    tg_app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
